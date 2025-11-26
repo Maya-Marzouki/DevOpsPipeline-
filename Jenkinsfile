@@ -9,14 +9,14 @@ tools {
 environment {
     MAVEN_HOME = "${tool 'M2_HOME'}"
     PATH = "${env.MAVEN_HOME}/bin:${env.PATH}"
-    DOCKER_IMAGE = "malekmouelhi7/student-management"
+    DOCKER_IMAGE = "mayamarzouki/student-management"
     DOCKER_TAG = "${env.BUILD_NUMBER}"
 }
 
 stages {
     stage('Checkout') {
         steps {
-            git branch: 'master', url: 'https://github.com/Malekmouelh/jenkins.git'
+            git branch: 'master', url: 'https://github.com/Maya-Marzouki/DevOpsPipeline-.git'
         }
     }
 
@@ -119,7 +119,7 @@ post {
            ./deploy-docker.sh
 
         2. Vérifiez sur DockerHub :
-           https://hub.docker.com/r/malekmouelhi7/student-management
+           https://hub.docker.com/r/mayamarzouki/student-management
 
         3. Pour tester localement :
            docker run -p 8089:8089 ${env.DOCKER_IMAGE}:${env.DOCKER_TAG}
