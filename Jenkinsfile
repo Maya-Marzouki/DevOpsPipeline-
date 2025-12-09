@@ -1,58 +1,53 @@
 pipeline {
     agent any
-
+    
     tools {
         maven 'M2_HOME'
     }
-
+    
     environment {
-        MAVEN_HOME = "${tool 'M2_HOME'}"
-        PATH = "${env.MAVEN_HOME}/bin:${env.PATH}"
-        DOCKER_IMAGE = "mayamarzouki/student-management"
+        DOCKER_IMAGE = 'mayamarzouki/student-management'
         DOCKER_TAG = "${env.BUILD_NUMBER}"
-        SONAR_HOST_URL = "http://localhost:9000"
+        K8S_NAMESPACE = 'devops'
     }
 
     stages {
-        stage('Compile') {
+        stage('Checkout') {
             steps {
-                sh 'mvn compile'
+                git branch: 'master',
+                    url: 'https://github.com/Maya-Marzouki/DevOpsPipeline-.git'
             }
         }
 
-        stage('Test') {
+        stage('Setup Kubernetes') {
             steps {
-                sh 'mvn test'
-            }
-            post {
-                always {
-                    junit 'target/surefire-reports/*.xml'
+                script {
+                    sh """
+                        export KUBECONFIG=/var/lib/jenkins/.kube/config
+
+                        echo "=== Configuration Kubernetes ==="
+
+                        # Créer le namespace
+                        kubectl create namespace ${env.K8S_NAMESPACE} --dry-run=client -o yaml | kubectl apply -f -
+
+                        # Vérifier la connexion
+                        kubectl cluster-info
+                    """
                 }
             }
         }
 
-        stage('Code Coverage') {
+        stage('Build & Test') {
             steps {
-                sh 'mvn jacoco:prepare-agent test jacoco:report'
+                sh 'mvn clean compile test'
             }
         }
 
         stage('SonarQube Analysis') {
             steps {
+                // Utiliser le SonarQube existant (pas celui sur K8S pour le moment)
                 withSonarQubeEnv('sonarqube') {
-                    sh 'mvn sonar:sonar \
-                        -Dsonar.projectKey=student-management \
-                        -Dsonar.projectName=student-management \
-                        -Dsonar.java.binaries=target/classes \
-                        -Dsonar.coverage.jacoco.xmlReportPaths=target/site/jacoco/jacoco.xml'
-                }
-            }
-        }
-
-        stage('Quality Gate') {
-            steps {
-                timeout(time: 5, unit: 'MINUTES') {
-                    waitForQualityGate abortPipeline: false
+                    sh 'mvn sonar:sonar -Dsonar.projectKey=student-management'
                 }
             }
         }
@@ -61,14 +56,9 @@ pipeline {
             steps {
                 sh 'mvn clean package -DskipTests'
             }
-            post {
-                success {
-                    archiveArtifacts artifacts: 'target/*.jar', fingerprint: true
-                }
-            }
         }
 
-        stage('Build Docker Image') {
+        stage('Build Docker') {
             steps {
                 sh """
                     docker build -t ${env.DOCKER_IMAGE}:${env.DOCKER_TAG} .
@@ -77,7 +67,7 @@ pipeline {
             }
         }
 
-        stage('Push Docker Image') {
+        stage('Push Docker') {
             steps {
                 withCredentials([usernamePassword(
                     credentialsId: 'dockerhub-credentials',
@@ -92,15 +82,153 @@ pipeline {
                 }
             }
         }
+
+        stage('Deploy SonarQube on K8S') {
+            steps {
+                script {
+                    sh """
+                        export KUBECONFIG=/var/lib/jenkins/.kube/config
+
+                        echo "=== Déploiement de SonarQube sur K8S ==="
+
+                        # Déployer SonarQube
+                        kubectl apply -f sonarqube-persistentvolume.yaml -n ${env.K8S_NAMESPACE} 2>/dev/null || echo "PV déjà existant"
+                        kubectl apply -f sonarqube-persistentvolumeclaim.yaml -n ${env.K8S_NAMESPACE}
+                        kubectl apply -f sonarqube-deployment.yaml -n ${env.K8S_NAMESPACE}
+                        kubectl apply -f sonarqube-service.yaml -n ${env.K8S_NAMESPACE}
+
+                        echo "SonarQube déployé. Attente du démarrage..."
+                        sleep 60
+
+                        # Vérifier l'état
+                        kubectl get pods -l app=sonarqube -n ${env.K8S_NAMESPACE}
+                        echo "URL SonarQube: http://localhost:30090"
+                    """
+                }
+            }
+        }
+
+        stage('Deploy MySQL on K8S') {
+            steps {
+                script {
+                    sh """
+                        export KUBECONFIG=/var/lib/jenkins/.kube/config
+
+                        echo "=== Déploiement de MySQL sur K8S ==="
+
+                        kubectl apply -f mysql-deployment.yaml -n ${env.K8S_NAMESPACE}
+
+                        echo "MySQL déployé. Attente du démarrage..."
+                        sleep 30
+
+                        kubectl get pods -l app=mysql -n ${env.K8S_NAMESPACE}
+                    """
+                }
+            }
+        }
+
+        stage('Verify SonarQube on K8S') {
+            steps {
+                script {
+                    sh """
+                        export KUBECONFIG=/var/lib/jenkins/.kube/config
+
+                        echo "=== Vérification de SonarQube sur K8S ==="
+
+                        # Attendre que SonarQube soit prêt
+                        echo "Attente de SonarQube..."
+                        for i in {1..30}; do
+                            if curl -s -f http://localhost:30090/api/system/status 2>/dev/null | grep -q "UP"; then
+                                echo "✓ SonarQube est prêt!"
+                                break
+                            fi
+                            echo "En attente... (\$i/30)"
+                            sleep 10
+                        done || echo "SonarQube prend du temps à démarrer"
+
+                        # Vérifier l'accès
+                        echo "Test d'accès à SonarQube..."
+                        curl -s http://localhost:30090/api/system/status || echo "SonarQube non accessible"
+
+                        # Vérifier notre projet
+                        echo "Vérification du projet..."
+                        curl -s "http://localhost:30090/api/projects/search?projects=student-management" | head -5 || echo "Impossible de vérifier le projet"
+                    """
+                }
+            }
+        }
+
+        stage('Update and Deploy Spring Boot') {
+            steps {
+                script {
+                    sh """
+                        echo "=== Mise à jour et déploiement de Spring Boot ==="
+
+                        # Mettre à jour l'image dans le fichier YAML
+                        sed -i 's|image:.*mayamarzouki/student-management.*|image: ${env.DOCKER_IMAGE}:${env.DOCKER_TAG}|g' spring-deployment.yaml
+
+                        # Déployer
+                        export KUBECONFIG=/var/lib/jenkins/.kube/config
+                        kubectl apply -f spring-deployment.yaml -n ${env.K8S_NAMESPACE}
+
+                        echo "Spring Boot déployé. Attente du démarrage..."
+                        sleep 30
+
+                        kubectl get pods -l app=spring-boot-app -n ${env.K8S_NAMESPACE}
+                    """
+                }
+            }
+        }
+
+        stage('Verify Deployment') {
+            steps {
+                script {
+                    sh """
+                        export KUBECONFIG=/var/lib/jenkins/.kube/config
+
+                        echo "=== Vérification finale ==="
+
+                        echo "1. État des pods:"
+                        kubectl get pods -n ${env.K8S_NAMESPACE} -o wide
+
+                        echo "2. Services:"
+                        kubectl get svc -n ${env.K8S_NAMESPACE}
+
+                        echo "3. Logs SonarQube:"
+                        kubectl logs deployment/sonarqube-deployment -n ${env.K8S_NAMESPACE} --tail=5 2>/dev/null || echo "Pas de logs disponibles"
+
+                        echo "4. URL SonarQube: http://localhost:30090"
+                        echo "5. URL Application: http://localhost:30080/student"
+                    """
+                }
+            }
+        }
     }
 
     post {
         success {
-            echo "Build ${env.BUILD_NUMBER} réussi!"
-            echo "Image Docker: ${env.DOCKER_IMAGE}:${env.DOCKER_TAG}"
+            echo "✅ Build ${env.BUILD_NUMBER} réussi !"
+            echo "🔗 SonarQube: http://localhost:30090"
+            echo "🔗 Application Spring: http://localhost:30080/student"
         }
         failure {
-            echo 'Build échoué!'
+            echo '❌ Build échoué!'
+            sh '''
+                echo "=== Débogage ==="
+                export KUBECONFIG=/var/lib/jenkins/.kube/config
+
+                echo "1. État des pods:"
+                kubectl get pods -n devops
+
+                echo "2. Détails SonarQube:"
+                kubectl describe pod -l app=sonarqube -n devops 2>/dev/null | head -50 || true
+
+                echo "3. Détails MySQL:"
+                kubectl describe pod -l app=mysql -n devops 2>/dev/null | head -50 || true
+
+                echo "4. Événements:"
+                kubectl get events -n devops 2>/dev/null | tail -20 || true
+            '''
         }
     }
 }

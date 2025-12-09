@@ -26,11 +26,11 @@
         <tag/>
         <url/>
     </scm>
-    <properties>
-        <java.version>17</java.version>
-        <sonar.host.url>http://localhost:9000</sonar.host.url>
-        <sonar.coverage.jacoco.xmlReportPaths>target/site/jacoco/jacoco.xml</sonar.coverage.jacoco.xmlReportPaths>
-    </properties>
+	<properties>
+		<java.version>17</java.version>  <!-- Changez 17 à 21 -->
+		<sonar.host.url>http://localhost:9000</sonar.host.url>
+		<sonar.coverage.jacoco.xmlReportPaths>target/site/jacoco/jacoco.xml</sonar.coverage.jacoco.xmlReportPaths>
+	</properties>
     <dependencies>
         <dependency>
             <groupId>org.springframework.boot</groupId>
